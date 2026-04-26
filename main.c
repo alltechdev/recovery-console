@@ -540,10 +540,45 @@ int main(int argc, char **argv) {
           for (int r = 0; r < term.rows; r++) term.dirty[r] = true;
           display_render(&disp, &term); osk_render(&disp, &osk); display_kick(&disp);
           if (code && !is_blanked) {
+            /* Wrap the synthetic key with sticky-modifier press/
+             * release events. input_ev_to_pty() updates in.shift /
+             * .ctrl / .alt from the modifier KEY events so the same
+             * char-mapping logic the physical-keyboard path uses
+             * applies to OSK presses. After dispatch we clear the
+             * sticky latches so they're truly one-shot. */
+            struct input_event mod_press = {.type = EV_KEY, .value = 1};
+            struct input_event mod_release = {.type = EV_KEY, .value = 0};
+            bool eff_shift = osk.shift || osk.last_autoshift;
+            if (eff_shift) {
+              mod_press.code = mod_release.code = KEY_LEFTSHIFT;
+              input_ev_to_pty(&in, &mod_press, pty_fd);
+            }
+            if (osk.ctrl) {
+              mod_press.code = mod_release.code = KEY_LEFTCTRL;
+              input_ev_to_pty(&in, &mod_press, pty_fd);
+            }
+            if (osk.alt) {
+              mod_press.code = mod_release.code = KEY_LEFTALT;
+              input_ev_to_pty(&in, &mod_press, pty_fd);
+            }
             struct input_event press = {.type = EV_KEY, .code = code, .value = 1};
             struct input_event release = {.type = EV_KEY, .code = code, .value = 0};
             input_ev_to_pty(&in, &press, pty_fd);
             input_ev_to_pty(&in, &release, pty_fd);
+            if (osk.alt) {
+              mod_release.code = KEY_LEFTALT;
+              input_ev_to_pty(&in, &mod_release, pty_fd);
+            }
+            if (osk.ctrl) {
+              mod_release.code = KEY_LEFTCTRL;
+              input_ev_to_pty(&in, &mod_release, pty_fd);
+            }
+            if (eff_shift) {
+              mod_release.code = KEY_LEFTSHIFT;
+              input_ev_to_pty(&in, &mod_release, pty_fd);
+            }
+            osk.shift = osk.ctrl = osk.alt = false;
+            osk.last_autoshift = false;
             term_snap_to_bottom(&term);
           }
         }

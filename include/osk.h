@@ -15,13 +15,15 @@
  * input_event records with EV_KEY codes.
  */
 
-#define OSK_ROWS 4
+#define OSK_ROWS 5
 #define OSK_MAX_COLS 10
 
 typedef struct {
-  uint16_t code;     /* KEY_* from <linux/input-event-codes.h> */
-  const char *label; /* what to draw on the cap */
-  uint8_t span;      /* width in cell units (1 or more) */
+  uint16_t code;      /* KEY_* from <linux/input-event-codes.h> */
+  const char *label;  /* what to draw on the cap */
+  uint8_t span;       /* width in cell units (1 or more) */
+  bool autoshift;     /* implicit SHIFT for this dispatch (for cap labels
+                       * like "{" / "|" / ":" whose key code is unshifted) */
 } OskKey;
 
 typedef struct {
@@ -33,6 +35,13 @@ typedef struct {
   int cols_per_row[OSK_ROWS];
 
   bool shift;     /* sticky shift state for letter caps */
+  bool ctrl;      /* sticky ctrl — clears after next keystroke */
+  bool alt;       /* sticky alt  — clears after next keystroke */
+  bool last_autoshift; /* true if the cap just released was tagged
+                        * autoshift; main.c reads this and synthesizes
+                        * a SHIFT press around the keystroke. Cleared
+                        * by the next press/release pair. */
+  int  page;      /* 0 = letters, 1 = numbers / symbols */
   int  pressed_row; /* -1 when no finger down */
   int  pressed_col;
 } OSK;
