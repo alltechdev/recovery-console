@@ -505,6 +505,7 @@ int main(int argc, char **argv) {
      *  position and dispatch a synthesized key event into the existing
      *  PTY pipeline when the finger lifts on an OSK cap. */
     static int touch_x = -1, touch_y = -1;
+    static bool finger_down = false;
     for (int i = 0; i < in.count; i++) {
       if (!FD_ISSET(in.fds[i], &rfds) || !g_vt_active)
         continue;
@@ -524,6 +525,22 @@ int main(int argc, char **argv) {
           touch_x = ev.value;
         else if (ev.code == ABS_MT_POSITION_Y || ev.code == ABS_Y)
           touch_y = ev.value;
+        /* While finger is down, refresh the OSK highlight as the
+         * finger moves. The Linux multitouch-B protocol is supposed
+         * to deliver position before BTN_TOUCH within a SYN report,
+         * but some drivers (this one included) interleave them, so
+         * the press-time hit test can land on the previous tap's
+         * coordinates. Re-running the press on every position event
+         * makes the highlight track the finger and pins the
+         * dispatch target to wherever the finger actually is when
+         * BTN_TOUCH=0 fires. */
+        if (finger_down && touch_x >= 0 && touch_y >= 0) {
+          int prev_r = osk.pressed_row, prev_c = osk.pressed_col;
+          osk_touch_press(&osk, touch_x, touch_y);
+          if (osk.pressed_row != prev_r || osk.pressed_col != prev_c) {
+            display_render(&disp, &term); osk_render(&disp, &osk); display_kick(&disp);
+          }
+        }
         continue;
       }
       if (ev.type != EV_KEY)
@@ -532,10 +549,15 @@ int main(int argc, char **argv) {
       /* OSK finger-down/up via BTN_TOUCH from the touchpanel. */
       if (ev.code == BTN_TOUCH) {
         if (ev.value == 1) {
-          osk_touch_press(&osk, touch_x, touch_y);
-          for (int r = 0; r < term.rows; r++) term.dirty[r] = true;
-          display_render(&disp, &term); osk_render(&disp, &osk); display_kick(&disp);
+          finger_down = true;
+          /* Don't render yet — the BTN_TOUCH-vs-position event order
+           * isn't guaranteed across drivers. The ABS handler above
+           * picks up the fresh coordinates and re-runs the press
+           * with valid x/y. */
+          touch_x = touch_y = -1;
+          osk.pressed_row = osk.pressed_col = -1;
         } else {
+          finger_down = false;
           uint16_t code = osk_touch_release(&osk, touch_x, touch_y);
           for (int r = 0; r < term.rows; r++) term.dirty[r] = true;
           display_render(&disp, &term); osk_render(&disp, &osk); display_kick(&disp);
