@@ -2,6 +2,7 @@
 #include "config.h"
 #include "display.h"
 #include <dirent.h>
+#include <errno.h>
 #include <drm/drm.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_mode.h>

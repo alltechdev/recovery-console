@@ -4,6 +4,7 @@
 #define CMD_START "start recovery"
 #include "display.h"
 #include "input.h"
+#include "osk.h"
 #include "term.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -225,7 +226,31 @@ int main(int argc, char **argv) {
 
   if (!display_init(&disp))
     return 1;
-  term_init(&term, disp.width, disp.height, disp.cell_w, disp.cell_h);
+
+  /* Wake the touchpanel via the kernel-side force_resume hook (added
+   * by patches/droidspaces/003-touch-force-resume in the dre kernel
+   * tree). The Novatek touch IC suspends on panel-off and only wakes
+   * on a real mdss_panel_notifier event; our DRM path uses the legacy
+   * SETCRTC fallback which doesn't fire one, so without this poke the
+   * touchscreen sends zero events. */
+  {
+    int tpfd = open("/proc/touchpanel/force_resume", O_WRONLY);
+    if (tpfd >= 0) {
+      (void)write(tpfd, "1", 1);
+      close(tpfd);
+      LOG("touchpanel force_resume sent");
+    } else {
+      LOG("touchpanel force_resume node missing — touch will be dead");
+    }
+  }
+
+  /* Reserve the bottom strip for the on-screen keyboard. The term
+   * grid only sees disp.height - osk_height pixels so cells don't
+   * collide with the OSK caps. */
+  OSK osk = {0};
+  int osk_h = osk_height_for(disp.width, disp.height);
+  osk_init(&osk, disp.width, disp.height);
+  term_init(&term, disp.width, disp.height - osk_h, disp.cell_w, disp.cell_h);
 
   /*  Signal handlers  *
    * Install VT signals BEFORE vt_init() so there is no window where the
@@ -374,7 +399,7 @@ int main(int argc, char **argv) {
           term_scroll(&term, -3);
         if (hold_vol_down)
           term_scroll(&term, 3);
-        display_render(&disp, &term);
+        display_render(&disp, &term); osk_render(&disp, &osk); display_kick(&disp);
         last_tick = now;
         last_phys_input = now; /* verify: scrolling counts as activity */
       }
@@ -396,7 +421,7 @@ int main(int argc, char **argv) {
       input_flush(&in); /* discard keys buffered while VT was inactive   */
       for (int r = 0; r < term.rows; r++)
         term.dirty[r] = true;
-      display_render(&disp, &term);
+      display_render(&disp, &term); osk_render(&disp, &osk); display_kick(&disp);
     }
 
     /*  Accept new client  */
@@ -412,7 +437,7 @@ int main(int argc, char **argv) {
           display_blank(&disp, false);
           for (int r = 0; r < term.rows; r++)
             term.dirty[r] = true;
-          display_render(&disp, &term);
+          display_render(&disp, &term); osk_render(&disp, &osk); display_kick(&disp);
         }
         clock_gettime(CLOCK_MONOTONIC, &loop_ts);
         last_phys_input = (uint64_t)loop_ts.tv_sec * 1000 +
@@ -459,8 +484,9 @@ int main(int argc, char **argv) {
       if (n > 0) {
         term_write(&term, b, (int)n);
         replay_append(b, (size_t)n);
-        if (!is_blanked)
-          display_render(&disp, &term);
+        if (!is_blanked) {
+          display_render(&disp, &term); osk_render(&disp, &osk); display_kick(&disp);
+        }
         if (is_service)
           (void)write(STDOUT_FILENO, b, (size_t)n);
         if (cli_fd >= 0)
@@ -472,7 +498,13 @@ int main(int argc, char **argv) {
       }
     }
 
-    /*  Keyboard / input events  */
+    /*  Keyboard / input events
+     *  Touch events come in as a stream of EV_ABS records (per-slot
+     *  X/Y) terminated by EV_SYN SYN_REPORT, with BTN_TOUCH (an
+     *  EV_KEY) marking finger down/up. We track the most recent slot-0
+     *  position and dispatch a synthesized key event into the existing
+     *  PTY pipeline when the finger lifts on an OSK cap. */
+    static int touch_x = -1, touch_y = -1;
     for (int i = 0; i < in.count; i++) {
       if (!FD_ISSET(in.fds[i], &rfds) || !g_vt_active)
         continue;
@@ -484,8 +516,40 @@ int main(int argc, char **argv) {
         }
         continue;
       }
-      if (n != sizeof(ev) || ev.type != EV_KEY)
+      if (n != sizeof(ev))
         continue;
+
+      if (ev.type == EV_ABS) {
+        if (ev.code == ABS_MT_POSITION_X || ev.code == ABS_X)
+          touch_x = ev.value;
+        else if (ev.code == ABS_MT_POSITION_Y || ev.code == ABS_Y)
+          touch_y = ev.value;
+        continue;
+      }
+      if (ev.type != EV_KEY)
+        continue;
+
+      /* OSK finger-down/up via BTN_TOUCH from the touchpanel. */
+      if (ev.code == BTN_TOUCH) {
+        if (ev.value == 1) {
+          osk_touch_press(&osk, touch_x, touch_y);
+          for (int r = 0; r < term.rows; r++) term.dirty[r] = true;
+          display_render(&disp, &term); osk_render(&disp, &osk); display_kick(&disp);
+        } else {
+          uint16_t code = osk_touch_release(&osk, touch_x, touch_y);
+          for (int r = 0; r < term.rows; r++) term.dirty[r] = true;
+          display_render(&disp, &term); osk_render(&disp, &osk); display_kick(&disp);
+          if (code && !is_blanked) {
+            struct input_event press = {.type = EV_KEY, .code = code, .value = 1};
+            struct input_event release = {.type = EV_KEY, .code = code, .value = 0};
+            input_ev_to_pty(&in, &press, pty_fd);
+            input_ev_to_pty(&in, &release, pty_fd);
+            term_snap_to_bottom(&term);
+          }
+        }
+        last_phys_input = now;
+        continue;
+      }
 
       /* Hardware activity detected */
       last_phys_input = now;
@@ -499,7 +563,7 @@ int main(int argc, char **argv) {
           display_blank(&disp, false);
           for (int r = 0; r < term.rows; r++)
             term.dirty[r] = true;
-          display_render(&disp, &term);
+          display_render(&disp, &term); osk_render(&disp, &osk); display_kick(&disp);
         }
         continue;
       }
@@ -508,7 +572,7 @@ int main(int argc, char **argv) {
       if (ev.code == KEY_VOLUMEUP) {
         if (ev.value == 1) { /* initial click */
           term_scroll(&term, -3);
-          display_render(&disp, &term);
+          display_render(&disp, &term); osk_render(&disp, &osk); display_kick(&disp);
           hold_vol_up = 1;
         } else if (ev.value == 0) {
           hold_vol_up = 0;
@@ -518,7 +582,7 @@ int main(int argc, char **argv) {
       if (ev.code == KEY_VOLUMEDOWN) {
         if (ev.value == 1) {
           term_scroll(&term, 3);
-          display_render(&disp, &term);
+          display_render(&disp, &term); osk_render(&disp, &osk); display_kick(&disp);
           hold_vol_down = 1;
         } else if (ev.value == 0) {
           hold_vol_down = 0;

@@ -1,6 +1,6 @@
 BINARY  = recovery-console
 OUTDIR  = output
-SRCS    = main.c display.c drm.c fbdev.c term.c input.c font.c
+SRCS    = main.c display.c drm.c fbdev.c term.c input.c font.c osk.c
 NPROC  := $(shell nproc 2>/dev/null || echo 4)
 
 # ── Architecture detection ───────────────────────────────────────────────
@@ -88,7 +88,8 @@ include/font_data.h: font.ttf
 	$(Q)xxd -i $< > $@
 
 $(OBJDIR)/%.o: %.c include/config.h include/display.h include/term.h \
-               include/font.h include/font_data.h | $(OBJDIR)
+               include/font.h include/font_data.h include/osk.h \
+               include/input.h | $(OBJDIR)
 	@printf "  CC   %s\n" $<
 	$(Q)$(CC) $(CFLAGS) -DHAVE_EMBEDDED_FONT \
 	    $(if $(SYSROOT),--sysroot=$(SYSROOT)) -c $< -o $@

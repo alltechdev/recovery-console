@@ -508,6 +508,87 @@ void display_render(DisplayDev *d, Term *t) {
     display_kick(d);
 }
 
+/*  Public drawing primitives — used by the OSK overlay.
+ *  All inputs in screen-space px; the existing fb_px / hfill helpers
+ *  handle rotation so callers don't have to. */
+void display_draw_rect(int x, int y, int w, int h, uint32_t rgba) {
+  if (!g_fb) return;
+  /* Clip to screen. */
+  int sw = g_fb_w, sh = g_fb_h;
+#if ROTATION == 1 || ROTATION == 3
+  sw = g_fb_h; sh = g_fb_w;
+#endif
+  if (x < 0) { w += x; x = 0; }
+  if (y < 0) { h += y; y = 0; }
+  if (x + w > sw) w = sw - x;
+  if (y + h > sh) h = sh - y;
+  if (w <= 0 || h <= 0) return;
+  for (int yy = 0; yy < h; yy++)
+    hfill(x, y + yy, w, rgba);
+}
+
+void display_draw_text(int x, int y, const char *s, uint32_t fg, uint32_t bg) {
+  if (!g_fb || !s) return;
+  const int bl = font_baseline();
+  int cur_x = x;
+  while (*s) {
+    /* Minimal UTF-8 decode — labels are ASCII for the OSK; stay safe. */
+    uint32_t cp = (uint8_t)*s++;
+    if (cp >= 0x80) {
+      /* Skip continuation bytes; render as replacement. */
+      while (((uint8_t)*s & 0xC0) == 0x80) s++;
+      cp = 0xFFFD;
+    }
+    const Glyph *g = font_glyph(cp);
+    int adv = g->adv > 0 ? g->adv : 8;
+    if (g->px) {
+      const int gx = cur_x + g->bx;
+      const int gy = y + bl - g->by;
+      for (int gy2 = 0; gy2 < g->bh; gy2++) {
+        const uint8_t *src = g->px + gy2 * g->bw;
+        int py = gy + gy2;
+        for (int gx2 = 0; gx2 < g->bw; gx2++) {
+          uint8_t a = src[gx2];
+          if (a)
+            *fb_px(gx + gx2, py) = (a == 255) ? fg : blend_px(bg, fg, a);
+        }
+      }
+    }
+    cur_x += adv;
+  }
+}
+
+int display_text_width(const char *s) {
+  if (!s) return 0;
+  int w = 0;
+  while (*s) {
+    uint32_t cp = (uint8_t)*s++;
+    if (cp >= 0x80) {
+      while (((uint8_t)*s & 0xC0) == 0x80) s++;
+      cp = 0xFFFD;
+    }
+    const Glyph *g = font_glyph(cp);
+    w += g->adv > 0 ? g->adv : 8;
+  }
+  return w;
+}
+
+int display_get_width(void) {
+#if ROTATION == 1 || ROTATION == 3
+  return g_fb_h;
+#else
+  return g_fb_w;
+#endif
+}
+
+int display_get_height(void) {
+#if ROTATION == 1 || ROTATION == 3
+  return g_fb_w;
+#else
+  return g_fb_h;
+#endif
+}
+
 void display_blank(DisplayDev *d, bool blank) {
   if (d->is_drm) {
 #if USE_CRTC_BLANK

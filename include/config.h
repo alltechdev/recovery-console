@@ -57,8 +57,9 @@
 #define CSI_PARAMS_MAX 16
 #define SOCKET_PATH "/tmp/rc.sock"
 
+/* dre (OnePlus Nord N200 5G, SM4350) — qcom mdss panel0 backlight */
 #define BACKLIGHT_PATH                                                         \
-  "/sys/devices/platform/soc/soc:mtk_leds/leds/lcd-backlight/brightness"
+  "/sys/class/backlight/panel0-backlight/brightness"
 #define BACKLIGHT_VAL 200
 
 #define LOG(fmt, ...)                                                          \

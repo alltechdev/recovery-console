@@ -49,6 +49,17 @@ void display_free(DisplayDev *d);
 void backlight_set(int val);
 void backlight_wake(void);
 
+/* Drawing primitives for overlay UI (e.g. on-screen keyboard).
+ * All coordinates are in screen px; rotation handled internally.
+ * display_draw_text renders the UTF-8 string left-to-right with no
+ * wrapping, alpha-blended over bg, foreground fg; advance comes from
+ * the font glyph metrics. */
+void display_draw_rect(int x, int y, int w, int h, uint32_t rgba);
+void display_draw_text(int x, int y, const char *s, uint32_t fg, uint32_t bg);
+int  display_text_width(const char *s);
+int  display_get_width(void);
+int  display_get_height(void);
+
 /*  VT switching support
  *
  *  Lifecycle:
