@@ -405,6 +405,21 @@ int main(int argc, char **argv) {
       }
     }
 
+    /*  OSK long-press repeat (arrows, backspace).
+     *  osk_pump_repeat returns the KEY_* to inject when a held cap
+     *  has passed the repeat-delay + interval. We dispatch it through
+     *  the same press/release path as a fresh OSK release. */
+    {
+      uint16_t rcode = osk_pump_repeat(&osk, now);
+      if (rcode && !is_blanked) {
+        struct input_event press   = {.type = EV_KEY, .code = rcode, .value = 1};
+        struct input_event release = {.type = EV_KEY, .code = rcode, .value = 0};
+        input_ev_to_pty(&in, &press,   pty_fd);
+        input_ev_to_pty(&in, &release, pty_fd);
+        last_phys_input = now;
+      }
+    }
+
     /*  Deferred VT release (SIGUSR1)  */
     if (g_vt_rel) {
       g_vt_rel = 0;
@@ -536,7 +551,7 @@ int main(int argc, char **argv) {
          * BTN_TOUCH=0 fires. */
         if (finger_down && touch_x >= 0 && touch_y >= 0) {
           int prev_r = osk.pressed_row, prev_c = osk.pressed_col;
-          osk_touch_press(&osk, touch_x, touch_y);
+          osk_touch_press(&osk, touch_x, touch_y, now);
           if (osk.pressed_row != prev_r || osk.pressed_col != prev_c) {
             display_render(&disp, &term); osk_render(&disp, &osk); display_kick(&disp);
           }

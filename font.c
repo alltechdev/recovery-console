@@ -216,3 +216,119 @@ const Glyph *font_glyph(uint32_t cp) {
   }
   return g;
 }
+
+/* ============================================================
+ * OSK face — second FT_Face at a larger pixel size, dedicated cache.
+ * Mirrors the logic above; kept as a standalone block so the term
+ * code path is unchanged.
+ * ============================================================ */
+
+static FT_Face g_face_osk;
+static int g_baseline_osk;
+static Slot g_cache_osk[CACHE_SZ];
+static unsigned g_used_osk;
+static uint32_t g_gen_osk;
+static Glyph g_fallback_osk = {.adv = 0, .px = NULL};
+
+int font_baseline_osk(void) { return g_baseline_osk; }
+
+static Glyph *cache_get_osk(uint32_t cp) {
+  uint32_t h = cp_hash(cp);
+  for (uint32_t i = 0; i < CACHE_SZ; i++) {
+    uint32_t idx = (h + i) & CACHE_MASK;
+    if (!g_cache_osk[idx].used)
+      return NULL;
+    if (g_cache_osk[idx].cp == cp) {
+      g_cache_osk[idx].gen = ++g_gen_osk;
+      return &g_cache_osk[idx].g;
+    }
+  }
+  return NULL;
+}
+
+static Glyph *cache_alloc_osk(uint32_t cp) {
+  uint32_t h = cp_hash(cp);
+  for (uint32_t i = 0; i < CACHE_SZ; i++) {
+    uint32_t idx = (h + i) & CACHE_MASK;
+    if (!g_cache_osk[idx].used) {
+      g_cache_osk[idx].cp = cp;
+      g_cache_osk[idx].gen = ++g_gen_osk;
+      g_cache_osk[idx].used = true;
+      g_used_osk++;
+      return &g_cache_osk[idx].g;
+    }
+  }
+  return NULL;
+}
+
+bool font_init_osk(int pixel_size) {
+#ifdef HAVE_EMBEDDED_FONT
+  if (FT_New_Memory_Face(g_ft, font_ttf, (FT_Long)font_ttf_len, 0,
+                         &g_face_osk))
+    return false;
+#else
+  return false;
+#endif
+  if (FT_Set_Pixel_Sizes(g_face_osk, 0, pixel_size)) {
+    FT_Done_Face(g_face_osk);
+    g_face_osk = NULL;
+    return false;
+  }
+  FT_Size_Metrics *m = &g_face_osk->size->metrics;
+  g_baseline_osk = (int)(m->ascender >> 6);
+  /* Pre-build a tofu-ish fallback at the larger size. */
+  int w = (int)(m->max_advance >> 6);
+  int h = (int)((m->ascender - m->descender) >> 6);
+  if (w < 1) w = 1;
+  if (h < 1) h = 1;
+  uint8_t *px = calloc((size_t)(w * h), 1);
+  if (px) {
+    for (int x = 0; x < w; x++) { px[x] = 200; px[(h - 1) * w + x] = 200; }
+    for (int y = 0; y < h; y++) { px[y * w] = 200; px[y * w + w - 1] = 200; }
+    g_fallback_osk.bw = w;  g_fallback_osk.bh = h;
+    g_fallback_osk.bx = 1;  g_fallback_osk.by = g_baseline_osk - 2;
+    g_fallback_osk.adv = w; g_fallback_osk.px = px;
+  }
+  return true;
+}
+
+const Glyph *font_glyph_osk(uint32_t cp) {
+  if (!g_face_osk)
+    return &g_fallback_osk;
+  Glyph *g = cache_get_osk(cp);
+  if (g)
+    return g;
+  FT_UInt idx = FT_Get_Char_Index(g_face_osk, cp);
+  if (!idx) {
+    if (cp != 0xFFFD)
+      return font_glyph_osk(0xFFFD);
+    return &g_fallback_osk;
+  }
+  if (FT_Load_Glyph(g_face_osk, idx, FT_LOAD_DEFAULT) ||
+      FT_Render_Glyph(g_face_osk->glyph, FT_RENDER_MODE_NORMAL))
+    return &g_fallback_osk;
+
+  FT_GlyphSlot sl = g_face_osk->glyph;
+  FT_Bitmap *bm = &sl->bitmap;
+
+  g = cache_alloc_osk(cp);
+  if (!g)
+    return &g_fallback_osk;
+
+  g->cp = cp;
+  g->bx = sl->bitmap_left;
+  g->by = sl->bitmap_top;
+  g->adv = (int)(sl->advance.x >> 6);
+  g->bw = (int)bm->width;
+  g->bh = (int)bm->rows;
+  g->px = NULL;
+
+  if (g->bw > 0 && g->bh > 0) {
+    g->px = malloc((size_t)(g->bw * g->bh));
+    if (!g->px)
+      return &g_fallback_osk;
+    for (int row = 0; row < g->bh; row++)
+      memcpy(g->px + row * g->bw, bm->buffer + row * bm->pitch, (size_t)g->bw);
+  }
+  return g;
+}

@@ -4,66 +4,87 @@ This fork adds a touch on-screen keyboard to ravindu644/recovery-console.
 Source files specific to the OSK:
 
 - `include/osk.h` — public API, `OSK` struct, `OskKey` struct.
-- `osk.c` — layout tables, hit-test, render.
-- Edits in `display.c` and `include/display.h` — exposes
-  `display_draw_rect`, `display_draw_text`, `display_text_width`,
-  `display_get_width`, `display_get_height` so `osk.c` doesn't need
-  to reach into the file-static framebuffer globals.
-- Edits in `main.c` — drops the `EV_KEY`-only filter on the input
-  loop, tracks `ABS_MT_POSITION_X/Y` per slot, dispatches key
-  presses on `BTN_TOUCH=0`.
-- Edits in `Makefile` — adds `osk.c` to `SRCS` and `osk.h` /
-  `input.h` to header deps.
+- `osk.c` — layout tables, hit-test, render, long-press repeat.
+- `display.c` / `include/display.h` — `display_draw_rect`,
+  `display_draw_text`, plus the OSK-specific `display_draw_text_osk`
+  / `display_text_width_osk` (larger font face for legible labels)
+  and `display_draw_rounded_rect` (used as a sharp rect at radius=0
+  in current build, but kept available).
+- `font.c` / `include/font.h` — adds a second `FT_Face` at a larger
+  pixel size (`font_init_osk(40)`) with its own glyph cache, so OSK
+  labels render bigger than the terminal grid without affecting it.
+- `main.c` — drops the `EV_KEY`-only filter on the input loop, tracks
+  `ABS_MT_POSITION_X/Y` per slot, dispatches key presses on
+  `BTN_TOUCH=0`, and pumps `osk_pump_repeat()` per loop iteration so
+  long-pressed arrows / backspace auto-repeat.
 
 ## Layout
 
-5 rows of 10 cell-units. `OSK_HEIGHT_PX = 800` (configurable in
-`osk.c`); each row is `OSK_HEIGHT_PX / OSK_ROWS = 160 px`. Cell
-width is `screen_w / 10 = 108 px` on dre's 1080×2400 panel.
+Two pages. Page 0 (letters) has the extras row (terminal-control +
+arrows + home/end) on top. Page 1 (numbers + symbols) replaces the
+extras row with more symbols so that **every printable ASCII
+character** is reachable in one tap.
 
 ```
-                    ┌─────────────────────────────────────────────┐
-                    │ ESC TAB CTRL ALT  ^   v   <   >   Hm  End   │  (extras, both pages)
-                    ├─────────────────────────────────────────────┤
-PAGE 0 (alpha)      │  q   w   e   r   t   y   u   i   o   p     │
-                    │  a   s   d   f   g   h   j   k   l   <x    │
-                    │ shft z   x   c   v   b   n   m   .   ent   │
-                    │ ?123 ,   ___space___   -   /                │
-                    └─────────────────────────────────────────────┘
+PAGE 0 (alpha)
+┌─────────────────────────────────────────────┐
+│ esc tab ctrl alt  ↑   ↓   ←   →  home end   │  extras (repeatable arrows)
+│  q   w   e   r   t   y   u   i   o   p      │
+│   a   s   d   f   g   h   j   k   l         │  9 keys, naturally wider
+│ ⇧   z   x   c   v   b   n   m  ⌫            │  shift 1.5×, bsp 1.5×
+│ ?123    ,        space         .    ⏎       │  toggle 1.5×, space 5×
+└─────────────────────────────────────────────┘
 
-                    ┌─────────────────────────────────────────────┐
-                    │ ESC TAB CTRL ALT  ^   v   <   >   Hm  End   │
-                    ├─────────────────────────────────────────────┤
-PAGE 1 (sym)        │  1   2   3   4   5   6   7   8   9   0     │
-                    │  [   ]   {   }   \   |   ;   :   =   <x    │
-                    │ shft _   $   %   ^   &   *   ~   .   ent   │
-                    │ ABC  ,   ___space___   -   /                │
-                    └─────────────────────────────────────────────┘
+PAGE 1 (numbers + ALL symbols)
+┌─────────────────────────────────────────────┐
+│  1   2   3   4   5   6   7   8   9   0      │
+│  @   #   $   %   &   *   -   +   (   )      │
+│  "   '   :   ;   !   ?   =   /   [   ]      │
+│  `   ~   ^   <   >   _   |   \   {   }   ⌫  │  11 cells incl. bsp
+│ ABC     ,        space         .    ⏎       │
+└─────────────────────────────────────────────┘
 ```
 
-The bottom row's `space` cap has `span = 6`, fillers `,` `-` `/`
-take a single cell each, leaving 10 cell-units used.
+## Sizing model
+
+`OskKey.span` is in **half-cells**: a 1-cell letter key has `span=2`,
+shift/backspace/page-toggle/enter have `span=3` (1.5 cells), the
+spacebar has `span=10` (5 cells). Each row's pixel layout is
+computed independently:
+
+```
+key_pixel_width = key.span * screen_w / row_total_span
+```
+
+So a 9-key row (e.g. a-l on page 0, total span 18) renders with keys
+slightly wider than a 10-key row (total 20), and the 11-key page-1
+row 3 (total 22) is slightly tighter — natural Gboard behaviour
+without manually computing margins.
+
+`row_total_span[OSK_ROWS]` is recomputed on every page toggle.
 
 ## OskKey struct
 
 ```c
 typedef struct {
-  uint16_t code;      /* KEY_* from <linux/input-event-codes.h> */
-  const char *label;  /* drawn on the cap */
-  uint8_t span;       /* width in cell units */
-  bool autoshift;     /* implicit SHIFT for the dispatch */
+  uint16_t code;       /* KEY_* from <linux/input-event-codes.h> */
+  const char *label;   /* what to draw on the cap (UTF-8 OK now) */
+  uint8_t span;        /* width in half-cells */
+  bool autoshift;      /* implicit SHIFT for shifted-symbol caps */
+  bool repeatable;     /* long-press auto-repeats (arrows, bsp) */
 } OskKey;
 ```
 
-`autoshift` is the trick that lets caps labelled `{` map to
-`KEY_LEFTBRACE` (which on its own types `[`) — main.c sees
-`osk.last_autoshift` after a release and synthesizes a
-`KEY_LEFTSHIFT` press+release wrapping the dispatch. Same code path
-as sticky shift, just one-shot.
+`autoshift` lets caps labelled `{` / `:` / `?` etc. dispatch the
+underlying unshifted key code with a synthetic SHIFT wrapped around
+it. Same code path as sticky shift, just one-shot.
+
+`repeatable` flags keys whose long-press should auto-repeat (currently
+the four arrows on the extras row plus both backspace caps). The
+press timestamp is captured at touch-down; `osk_pump_repeat()` fires
+the first repeat at 400 ms, subsequent at 60 ms intervals.
 
 ## Touch flow
-
-`main.c` event handling for the touchpanel:
 
 ```
 EV_ABS ABS_MT_POSITION_X / Y  → update touch_x / touch_y
@@ -71,7 +92,7 @@ EV_ABS ABS_MT_POSITION_X / Y  → update touch_x / touch_y
                                 so highlight tracks finger live
 EV_KEY BTN_TOUCH = 1          → arm finger_down
                               → reset touch_x = touch_y = -1 and
-                                osk.pressed_* = -1 so we DON'T render
+                                osk.pressed_* = -1 so we don't render
                                 stale-cell highlight from previous tap
                               → ABS handler above will fire press once
                                 fresh coords land
@@ -84,10 +105,9 @@ EV_KEY BTN_TOUCH = 0          → osk_touch_release returns KEY_*
 The "BTN_TOUCH before position" race is real on dre — the Novatek
 nt36672c driver fires `BTN_TOUCH=1` before the new finger's
 `ABS_MT_POSITION_*` events within a SYN report, so the press-time
-hit test in commit `a3d3b90` (the first OSK cut) was hitting
-yesterday's coordinates. Commit `f958b6a` defers the press until
-ABS arrives. Side effect: dragging across keys now updates the
-highlight in real time, which is the right UX anyway.
+hit test can land on yesterday's coordinates. Solution: defer the
+press until ABS arrives, then re-run hit-test on every position
+event so dragging across keys updates the highlight live.
 
 ## Sticky modifier behaviour
 
@@ -98,61 +118,74 @@ matching `OSK` field:
 case KEY_LEFTSHIFT:  k->shift = !k->shift; return 0;
 case KEY_LEFTCTRL:   k->ctrl  = !k->ctrl;  return 0;
 case KEY_LEFTALT:    k->alt   = !k->alt;   return 0;
-case KEY_PAGE_TOGGLE:k->page  = !k->page;  return 0;  /* synthetic */
+case KEY_PAGE_TOGGLE:k->page  = (k->page+1) % 2; recompute_spans(k); return 0;
 default:             return code;
 ```
 
-(Returning 0 means "no key dispatched.") `KEY_PAGE_TOGGLE` is
-`0xFFF1` — outside the Linux `KEY_*` range so `input_ev_to_pty` won't
-accidentally interpret it.
+`KEY_PAGE_TOGGLE` is `0xFFF1` — outside the Linux `KEY_*` range so
+`input_ev_to_pty` won't accidentally interpret it.
 
-`main.c` reads the latches at dispatch time:
+`main.c` reads the latches at dispatch time and wraps the
+keystroke with synthetic SHIFT / CTRL / ALT press+release so the
+existing `input_ev_to_pty` char-mapping logic applies unchanged.
+
+## Long-press repeat
 
 ```c
-bool eff_shift = osk.shift || osk.last_autoshift;
-if (eff_shift) <send KEY_LEFTSHIFT press>
-if (osk.ctrl)  <send KEY_LEFTCTRL  press>
-if (osk.alt)   <send KEY_LEFTALT   press>
-<send KEY_* press + release>
-if (osk.alt)   <send KEY_LEFTALT   release>
-if (osk.ctrl)  <send KEY_LEFTCTRL  release>
-if (eff_shift) <send KEY_LEFTSHIFT release>
-osk.shift = osk.ctrl = osk.alt = false;
-osk.last_autoshift = false;
+uint16_t osk_pump_repeat(OSK *k, uint64_t now_ms);
 ```
 
-`input_ev_to_pty` keeps its own `in.shift` / `in.ctrl` / `in.alt`
-state by listening for the synthetic modifier KEY events, so the
-existing keyboard char-mapping logic applies unchanged.
+Called every main-loop iteration. Returns the `KEY_*` to inject
+when a held cap (with `repeatable: true`) has passed the initial
+delay (`OSK_REPEAT_DELAY_MS = 400`) and the per-repeat interval
+(`OSK_REPEAT_INTERVAL_MS = 60`) has elapsed since the last fire.
+Returns 0 otherwise. Currently flagged repeatable: `KEY_UP`,
+`KEY_DOWN`, `KEY_LEFT`, `KEY_RIGHT`, both `KEY_BACKSPACE` caps.
 
 ## Visual feedback
 
-`osk_render` fills the whole OSK region opaque dark, then draws each
-cap. Three cap states:
+Palette (Gboard-ish dark):
 
-- Default:        `0xff2c2c34`  (dark grey)
-- Pressed:        `0xff5a5a64`  (lighter grey, while finger is down)
-- Latched:        `0xff3a6e98`  (Termux-blue when sticky modifier
-                                 is set on this cap)
+```
+bg            #1f1f23  (very dark, slightly cool)
+cap (letter)  #3a3a42  (medium grey)
+cap (mod)     #2c2c34  (darker — modifiers, space, digits row)
+cap pressed   #56565e  (lighter feedback while finger is down)
+cap latched   #3a6e98  (blue accent for sticky shift/ctrl/alt)
+top hilite    #48484e  (1-px lighter line on cap top edge)
+label         #e8e8ee  (off-white)
+```
 
-Labels are drawn via `display_draw_text`, centered horizontally,
-baseline approximated at `(row_h - FONT_SIZE) / 2` from the top of
-the cap. A 4 px gutter (`OSK_PADDING_PX`) between caps.
+Sharp caps in current build (`OSK_RADIUS_PX = 0`); the radius
+constant + `display_draw_rounded_rect` primitive are kept around
+so re-enabling rounding is a one-line change.
+
+## Larger label font
+
+`font_init_osk(40)` opens a second `FT_Face` at 40-px pixel size
+(vs. terminal's `FONT_SIZE = 22`). The OSK uses
+`display_draw_text_osk` / `display_text_width_osk` which dispatch
+through that face and its dedicated glyph cache. The terminal grid
+is unaffected.
+
+## Shift-uppercase labels
+
+When `k->shift` is true and the cap is a single ASCII letter
+(`KEY_A..KEY_Z` with `'a'..'z'` label), `osk_render` substitutes the
+uppercase form before drawing. So pressing `⇧` flips the displayed
+letters to caps without rebuilding the layout table.
 
 ## Entry points
 
 ```c
-bool     osk_init        (OSK *k, int screen_w, int screen_h);
-int      osk_height_for  (int screen_w, int screen_h);
-uint16_t osk_hit_test    (const OSK *k, int x, int y, int *r, int *c);
-uint16_t osk_touch_press (OSK *k, int x, int y);
+bool     osk_init         (OSK *k, int screen_w, int screen_h);
+int      osk_height_for   (int screen_w, int screen_h);
+uint16_t osk_hit_test     (const OSK *k, int x, int y, int *r, int *c);
+uint16_t osk_touch_press  (OSK *k, int x, int y, uint64_t now_ms);
 uint16_t osk_touch_release(OSK *k, int x, int y);
-void     osk_render      (DisplayDev *d, OSK *k);
+uint16_t osk_pump_repeat  (OSK *k, uint64_t now_ms);
+void     osk_render       (DisplayDev *d, OSK *k);
 ```
-
-`osk_init` writes the layout into the OSK struct and returns true.
-`osk_height_for` is the size to subtract from `term_init`'s height
-so cells don't overlap the keyboard region.
 
 ## Build
 
@@ -197,3 +230,13 @@ few hundred milliseconds.
 If the kernel patch isn't applied, `main.c` logs
 `touchpanel force_resume node missing — touch will be dead` and
 the OSK renders fine but no touches reach it.
+
+## UTF-8 in labels
+
+`display_draw_text` (and its OSK variant) decode UTF-8 properly now
+— earlier they substituted `0xFFFD` for any byte ≥ 0x80, which
+turned every non-ASCII label into a fallback glyph. Arrows and
+similar codepoints (↑↓←→⇧⌫⏎) render via FreeType against
+`font.ttf`. If a glyph is missing from the font, the chosen label
+renders as a tofu-box; pick a different codepoint or fall back to
+ASCII (`Up`, `Dn`, etc.) for that cap.

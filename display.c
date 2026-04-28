@@ -527,18 +527,89 @@ void display_draw_rect(int x, int y, int w, int h, uint32_t rgba) {
     hfill(x, y + yy, w, rgba);
 }
 
+void display_draw_rounded_rect(int x, int y, int w, int h, int r,
+                               uint32_t rgba) {
+  if (!g_fb || w <= 0 || h <= 0)
+    return;
+  if (r <= 0) {
+    display_draw_rect(x, y, w, h, rgba);
+    return;
+  }
+  if (r * 2 > w) r = w / 2;
+  if (r * 2 > h) r = h / 2;
+
+  /* Per-scanline left/right inset based on the rounded corner SDF.
+   * The four corners are quarter-circles of radius r; the central
+   * band (y in [r, h-r-1]) is the full rect width. */
+  int sw = g_fb_w, sh = g_fb_h;
+#if ROTATION == 1 || ROTATION == 3
+  sw = g_fb_h;
+  sh = g_fb_w;
+#endif
+  int r2 = r * r;
+  for (int yy = 0; yy < h; yy++) {
+    int left = 0;
+    int right = w;
+    int dy;
+    if (yy < r)
+      dy = r - yy - 1;
+    else if (yy >= h - r)
+      dy = yy - (h - r);
+    else
+      dy = -1;
+    if (dy >= 0) {
+      /* dx = sqrt(r^2 - dy^2), integer floor — pixels with x in
+       * [r-dx, r+dx) are inside the quarter circle. */
+      int dx = 0;
+      while ((dx + 1) * (dx + 1) + dy * dy <= r2)
+        dx++;
+      left = r - dx;
+      right = w - r + dx;
+    }
+    int yabs = y + yy;
+    int x_start = x + left;
+    int x_len = right - left;
+    /* Clip vs screen. */
+    if (yabs < 0 || yabs >= sh)
+      continue;
+    if (x_start < 0) {
+      x_len += x_start;
+      x_start = 0;
+    }
+    if (x_start + x_len > sw)
+      x_len = sw - x_start;
+    if (x_len > 0)
+      hfill(x_start, yabs, x_len, rgba);
+  }
+}
+
+/* UTF-8 decode one codepoint from `s`, advancing `s` past it.
+ * Returns U+FFFD on malformed input. */
+static uint32_t utf8_advance(const char **s) {
+  const uint8_t *p = (const uint8_t *)*s;
+  uint8_t b0 = *p++;
+  uint32_t cp;
+  int extra;
+  if (b0 < 0x80)               { cp = b0;        extra = 0; }
+  else if ((b0 & 0xE0) == 0xC0){ cp = b0 & 0x1F; extra = 1; }
+  else if ((b0 & 0xF0) == 0xE0){ cp = b0 & 0x0F; extra = 2; }
+  else if ((b0 & 0xF8) == 0xF0){ cp = b0 & 0x07; extra = 3; }
+  else { *s = (const char *)p; return 0xFFFD; }
+  for (int i = 0; i < extra; i++) {
+    uint8_t b = *p++;
+    if ((b & 0xC0) != 0x80) { *s = (const char *)p; return 0xFFFD; }
+    cp = (cp << 6) | (b & 0x3F);
+  }
+  *s = (const char *)p;
+  return cp;
+}
+
 void display_draw_text(int x, int y, const char *s, uint32_t fg, uint32_t bg) {
   if (!g_fb || !s) return;
   const int bl = font_baseline();
   int cur_x = x;
   while (*s) {
-    /* Minimal UTF-8 decode — labels are ASCII for the OSK; stay safe. */
-    uint32_t cp = (uint8_t)*s++;
-    if (cp >= 0x80) {
-      /* Skip continuation bytes; render as replacement. */
-      while (((uint8_t)*s & 0xC0) == 0x80) s++;
-      cp = 0xFFFD;
-    }
+    uint32_t cp = utf8_advance(&s);
     const Glyph *g = font_glyph(cp);
     int adv = g->adv > 0 ? g->adv : 8;
     if (g->px) {
@@ -562,12 +633,45 @@ int display_text_width(const char *s) {
   if (!s) return 0;
   int w = 0;
   while (*s) {
-    uint32_t cp = (uint8_t)*s++;
-    if (cp >= 0x80) {
-      while (((uint8_t)*s & 0xC0) == 0x80) s++;
-      cp = 0xFFFD;
-    }
+    uint32_t cp = utf8_advance(&s);
     const Glyph *g = font_glyph(cp);
+    w += g->adv > 0 ? g->adv : 8;
+  }
+  return w;
+}
+
+void display_draw_text_osk(int x, int y, const char *s, uint32_t fg,
+                           uint32_t bg) {
+  if (!g_fb || !s) return;
+  const int bl = font_baseline_osk();
+  int cur_x = x;
+  while (*s) {
+    uint32_t cp = utf8_advance(&s);
+    const Glyph *g = font_glyph_osk(cp);
+    int adv = g->adv > 0 ? g->adv : 8;
+    if (g->px) {
+      const int gx = cur_x + g->bx;
+      const int gy = y + bl - g->by;
+      for (int gy2 = 0; gy2 < g->bh; gy2++) {
+        const uint8_t *src = g->px + gy2 * g->bw;
+        int py = gy + gy2;
+        for (int gx2 = 0; gx2 < g->bw; gx2++) {
+          uint8_t a = src[gx2];
+          if (a)
+            *fb_px(gx + gx2, py) = (a == 255) ? fg : blend_px(bg, fg, a);
+        }
+      }
+    }
+    cur_x += adv;
+  }
+}
+
+int display_text_width_osk(const char *s) {
+  if (!s) return 0;
+  int w = 0;
+  while (*s) {
+    uint32_t cp = utf8_advance(&s);
+    const Glyph *g = font_glyph_osk(cp);
     w += g->adv > 0 ? g->adv : 8;
   }
   return w;
@@ -656,6 +760,10 @@ bool display_init(DisplayDev *d) {
     LOG("font_init failed");
     return false;
   }
+  /* Larger face dedicated to OSK labels — non-fatal if it fails;
+   * osk_render falls back to the regular face. */
+  if (!font_init_osk(40))
+    LOG("font_init_osk(40) failed; OSK will use small font");
 
   /* Try DRM first. */
   ensure_node(DRM_DEVICE, DRM_MAJOR, DRM_MINOR);

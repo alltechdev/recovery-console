@@ -26,4 +26,11 @@ int font_wcwidth(uint32_t cp);
 /* Ascender in pixels (baseline offset from cell top) */
 int font_baseline(void);
 
+/* Second font face at a different pixel size — used by the OSK so its
+ * key labels can be rendered larger without affecting the terminal
+ * grid. Initialized after font_init(); pass desired pixel size. */
+bool font_init_osk(int pixel_size);
+const Glyph *font_glyph_osk(uint32_t cp);
+int font_baseline_osk(void);
+
 #endif

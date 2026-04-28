@@ -55,7 +55,16 @@ void backlight_wake(void);
  * wrapping, alpha-blended over bg, foreground fg; advance comes from
  * the font glyph metrics. */
 void display_draw_rect(int x, int y, int w, int h, uint32_t rgba);
+/* Rounded-rectangle fill. Corner radius `r` in px; r=0 falls back to
+ * a sharp rect. Alpha-blended via the same hfill path as draw_rect. */
+void display_draw_rounded_rect(int x, int y, int w, int h, int r, uint32_t rgba);
 void display_draw_text(int x, int y, const char *s, uint32_t fg, uint32_t bg);
+
+/* Same as display_draw_text but renders with the larger OSK font face
+ * (font_init_osk must have been called first). Used for OSK labels
+ * so they read clearly on big touch caps. */
+void display_draw_text_osk(int x, int y, const char *s, uint32_t fg, uint32_t bg);
+int  display_text_width_osk(const char *s);
 int  display_text_width(const char *s);
 int  display_get_width(void);
 int  display_get_height(void);
